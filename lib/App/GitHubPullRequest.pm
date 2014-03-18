@@ -80,18 +80,18 @@ none is specified.
 sub list {
     my ($self, $state) = @_;
     $state ||= 'open';
-    my $remote_repo = _find_github_remote();
-    my $prs = _api_read("/repos/$remote_repo/pulls?state=$state");
-    say ucfirst($state) . " pull requests for '$remote_repo':";
-    unless ( @$prs ) {
-        say "No pull requests found.";
-        return 0;
-    }
-    foreach my $pr ( @$prs ) {
-        my $number = $pr->{"number"};
-        my $title = encode_utf8( $pr->{"title"} );
-        my $date = $pr->{"updated_at"} || $pr->{'created_at'};
-        say join(" ", $number, $date, $title);
+    my @remote_repos = _find_github_remote();
+    for my $remote_repo (@remote_repos) {
+        my $prs = _api_read("/repos/$remote_repo/pulls?state=$state");
+        say ucfirst($state) . " pull requests for '$remote_repo':";
+        if ( $prs && @$prs ) {
+            foreach my $pr ( @$prs ) {
+                my $number = $pr->{"number"};
+                my $title = encode_utf8( $pr->{"title"} );
+                my $date = $pr->{"updated_at"} || $pr->{'created_at'};
+                say join(" ", $number, $date, $title);
+            }
+        }
     }
     return 0;
 }
@@ -391,31 +391,36 @@ sub _fetch_one {
 
 sub _find_github_remote {
     # Parse lines from git and use first found github repo
-    my $repo;
+    my %repos;
+
+    # Allow override for testing
+    if ($ENV{'GITHUB_REPO'}) {
+        return $ENV{"GITHUB_REPO"};
+    }
+
     foreach my $line ( _qx('git', 'remote -v') ) {
         my ($remote, $url, $type) = split /\s+/, $line;
         next unless $type eq '(fetch)'; # only consider fetch remotes
         next unless $url =~ m/github\.com/; # only consider remotes to github
         if ( $url =~ m{github.com[:/](.+?)(?:\.git)?$} ) {
-            $repo = $1;
-            last;
+            my $repo = $1;
+            # Fetch repo information
+            my $repo_info = _api_read("/repos/$repo");
+            if (defined $repo_info) {
+                # Include the parent repo if repo is a fork
+                if ($repo_info->{'fork'}) {
+                    $repos{$repo_info->{'parent'}->{'full_name'}} = 1;
+                } else {
+                    $repos{$repo} = 1;
+                }
+            }
         }
     }
 
-    # Allow override for testing
-    $repo = $ENV{"GITHUB_REPO"} if $ENV{'GITHUB_REPO'};
     die("No valid GitHub remote repo found.\n")
-        unless $repo;
+        unless scalar keys %repos > 0;
 
-    # Fetch repo information
-    my $repo_info = _api_read("/repos/$repo");
-
-    # Return the parent repo if repo is a fork
-    return $repo_info->{'parent'}->{'full_name'}
-        if $repo_info->{'fork'};
-
-    # Not a fork, use this repo
-    return $repo;
+    return keys %repos;
 }
 
 # Ask the user for some information
@@ -541,12 +546,8 @@ sub _is_api_url {
 
 # Perform an API GET request
 sub _api_read {
-    my ($url) = @_;
-    return decode_json(
-        _get_url(
-            _api_url($url),
-        )
-    );
+    my $json = _get_url( _api_url(shift) );
+    return $json ? decode_json($json) : undef;
 }
 
 # Perform an API POST request
@@ -598,7 +599,8 @@ sub _get_url {
 
     my $code = substr($content, -3, 3, '');
     if ( $code >= 400 ) {
-        die("Fetching URL $url failed with code $code:\n$content");
+        warn("Fetching URL $url failed with code $code:\n$content");
+        return;
     }
 
     return $content;
